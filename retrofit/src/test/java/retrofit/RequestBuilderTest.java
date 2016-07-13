@@ -47,7 +47,6 @@ import retrofit.mime.MultipartTypedOutput;
 import retrofit.mime.TypedInput;
 import retrofit.mime.TypedOutput;
 import retrofit.mime.TypedString;
-import rx.Observable;
 
 import static com.google.common.base.Charsets.UTF_8;
 import static java.lang.annotation.ElementType.METHOD;
@@ -274,22 +273,6 @@ public class RequestBuilderTest {
     } catch (IllegalArgumentException e) {
       assertThat(e).hasMessage(
           "Example.method: Only methods having Response as data type are allowed to have @Streaming annotation.");
-    }
-  }
-
-  @Test public void observableWithCallback() {
-    class Example {
-      @GET("/foo") //
-      Observable<Response> method(Callback<Response> callback) {
-        return null;
-      }
-    }
-    try {
-      buildRequest(Example.class);
-      fail();
-    } catch (IllegalArgumentException e) {
-      assertThat(e).hasMessage(
-          "Example.method: Must have return type or Callback as last argument, not both.");
     }
   }
 

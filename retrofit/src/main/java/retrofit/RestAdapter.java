@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+
 import retrofit.Profiler.RequestInformation;
 import retrofit.client.Client;
 import retrofit.client.Header;
@@ -105,46 +106,9 @@ import retrofit.mime.TypedOutput;
  * @author Jake Wharton (jw@squareup.com)
  */
 public class RestAdapter {
+
   static final String THREAD_PREFIX = "Retrofit-";
   static final String IDLE_THREAD_NAME = THREAD_PREFIX + "Idle";
-
-  /** Simple logging abstraction for debug messages. */
-  public interface Log {
-    /** Log a debug message to the appropriate console. */
-    void log(String message);
-
-    /** A {@link Log} implementation which does not log anything. */
-    Log NONE = new Log() {
-      @Override public void log(String message) {
-      }
-    };
-  }
-
-  /** Controls the level of logging. */
-  public enum LogLevel {
-    /** No logging. */
-    NONE,
-    /** Log only the request method and URL and the response status code and execution time. */
-    BASIC,
-    /** Log the basic information along with request and response headers. */
-    HEADERS,
-    /** Log the basic information along with request and response objects via toString(). */
-    HEADERS_AND_ARGS,
-    /**
-     * Log the headers, body, and metadata for both requests and responses.
-     * <p>
-     * Note: This requires that the entire request and response body be buffered in memory!
-     */
-    FULL;
-
-    public boolean log() {
-      return this != NONE;
-    }
-  }
-
-  private final Map<Class<?>, Map<Method, RestMethodInfo>> serviceMethodInfoCache =
-      new LinkedHashMap<Class<?>, Map<Method, RestMethodInfo>>();
-
   final Endpoint server;
   final Executor httpExecutor;
   final Executor callbackExecutor;
@@ -152,16 +116,15 @@ public class RestAdapter {
   final Converter converter;
   final Log log;
   final ErrorHandler errorHandler;
-
+  private final Map<Class<?>, Map<Method, RestMethodInfo>> serviceMethodInfoCache =
+      new LinkedHashMap<Class<?>, Map<Method, RestMethodInfo>>();
   private final Client.Provider clientProvider;
   private final Profiler profiler;
-  private RxSupport rxSupport;
-
   volatile LogLevel logLevel;
-
   private RestAdapter(Endpoint server, Client.Provider clientProvider, Executor httpExecutor,
-      Executor callbackExecutor, RequestInterceptor requestInterceptor, Converter converter,
-      Profiler profiler, ErrorHandler errorHandler, Log log, LogLevel logLevel) {
+                      Executor callbackExecutor, RequestInterceptor requestInterceptor,
+                      Converter converter,
+                      Profiler profiler, ErrorHandler errorHandler, Log log, LogLevel logLevel) {
     this.server = server;
     this.clientProvider = clientProvider;
     this.httpExecutor = httpExecutor;
@@ -172,38 +135,6 @@ public class RestAdapter {
     this.errorHandler = errorHandler;
     this.log = log;
     this.logLevel = logLevel;
-  }
-
-  /** Change the level of logging. */
-  public void setLogLevel(LogLevel loglevel) {
-    if (logLevel == null) {
-      throw new NullPointerException("Log level may not be null.");
-    }
-    this.logLevel = loglevel;
-  }
-
-  /** The current logging level. */
-  public LogLevel getLogLevel() {
-    return logLevel;
-  }
-
-  /** Create an implementation of the API defined by the specified {@code service} interface. */
-  @SuppressWarnings("unchecked")
-  public <T> T create(Class<T> service) {
-    Utils.validateServiceClass(service);
-    return (T) Proxy.newProxyInstance(service.getClassLoader(), new Class<?>[] { service },
-        new RestHandler(getMethodInfoCache(service)));
-  }
-
-  Map<Method, RestMethodInfo> getMethodInfoCache(Class<?> service) {
-    synchronized (serviceMethodInfoCache) {
-      Map<Method, RestMethodInfo> methodInfoCache = serviceMethodInfoCache.get(service);
-      if (methodInfoCache == null) {
-        methodInfoCache = new LinkedHashMap<Method, RestMethodInfo>();
-        serviceMethodInfoCache.put(service, methodInfoCache);
-      }
-      return methodInfoCache;
-    }
   }
 
   static RestMethodInfo getMethodInfo(Map<Method, RestMethodInfo> cache, Method method) {
@@ -217,7 +148,429 @@ public class RestAdapter {
     }
   }
 
+  private static Profiler.RequestInformation getRequestInfo(String serverUrl,
+                                                            RestMethodInfo methodDetails,
+                                                            Request request) {
+    long contentLength = 0;
+    String contentType = null;
+
+    TypedOutput body = request.getBody();
+    if (body != null) {
+      contentLength = body.length();
+      contentType = body.mimeType();
+    }
+
+    return new Profiler.RequestInformation(methodDetails.requestMethod, serverUrl,
+                                           methodDetails.requestUrl, contentLength, contentType);
+  }
+
+  /**
+   * The current logging level.
+   */
+  public LogLevel getLogLevel() {
+    return logLevel;
+  }
+
+  /**
+   * Change the level of logging.
+   */
+  public void setLogLevel(LogLevel loglevel) {
+    if (logLevel == null) {
+      throw new NullPointerException("Log level may not be null.");
+    }
+    this.logLevel = loglevel;
+  }
+
+  /**
+   * Create an implementation of the API defined by the specified {@code service} interface.
+   */
+  @SuppressWarnings("unchecked")
+  public <T> T create(Class<T> service) {
+    Utils.validateServiceClass(service);
+    return (T) Proxy.newProxyInstance(service.getClassLoader(), new Class<?>[]{service},
+                                      new RestHandler(getMethodInfoCache(service)));
+  }
+
+  Map<Method, RestMethodInfo> getMethodInfoCache(Class<?> service) {
+    synchronized (serviceMethodInfoCache) {
+      Map<Method, RestMethodInfo> methodInfoCache = serviceMethodInfoCache.get(service);
+      if (methodInfoCache == null) {
+        methodInfoCache = new LinkedHashMap<Method, RestMethodInfo>();
+        serviceMethodInfoCache.put(service, methodInfoCache);
+      }
+      return methodInfoCache;
+    }
+  }
+
+  /**
+   * Log request headers and body. Consumes request body and returns identical replacement.
+   */
+  Request logAndReplaceRequest(String name, Request request, Object[] args) throws IOException {
+    log.log(String.format("---> %s %s %s", name, request.getMethod(), request.getUrl()));
+
+    if (logLevel.ordinal() >= LogLevel.HEADERS.ordinal()) {
+      for (Header header : request.getHeaders()) {
+        log.log(header.toString());
+      }
+
+      String bodySize = "no";
+      TypedOutput body = request.getBody();
+      if (body != null) {
+        String bodyMime = body.mimeType();
+        if (bodyMime != null) {
+          log.log("Content-Type: " + bodyMime);
+        }
+
+        long bodyLength = body.length();
+        bodySize = bodyLength + "-byte";
+        if (bodyLength != -1) {
+          log.log("Content-Length: " + bodyLength);
+        }
+
+        if (logLevel.ordinal() >= LogLevel.FULL.ordinal()) {
+          if (!request.getHeaders().isEmpty()) {
+            log.log("");
+          }
+          if (!(body instanceof TypedByteArray)) {
+            // Read the entire response body to we can log it and replace the original response
+            request = Utils.readBodyToBytesIfNecessary(request);
+            body = request.getBody();
+          }
+
+          byte[] bodyBytes = ((TypedByteArray) body).getBytes();
+          String bodyCharset = MimeUtil.parseCharset(body.mimeType());
+          log.log(new String(bodyBytes, bodyCharset));
+        } else if (logLevel.ordinal() >= LogLevel.HEADERS_AND_ARGS.ordinal()) {
+          if (!request.getHeaders().isEmpty()) {
+            log.log("---> REQUEST:");
+          }
+          for (int i = 0; i < args.length; i++) {
+            log.log("#" + i + ": " + args[i]);
+          }
+        }
+      }
+
+      log.log(String.format("---> END %s (%s body)", name, bodySize));
+    }
+
+    return request;
+  }
+
+  /**
+   * Log response headers and body. Consumes response body and returns identical replacement.
+   */
+  private Response logAndReplaceResponse(String url, Response response, long elapsedTime)
+      throws IOException {
+    log.log(String.format("<--- HTTP %s %s (%sms)", response.getStatus(), url, elapsedTime));
+
+    if (logLevel.ordinal() >= LogLevel.HEADERS.ordinal()) {
+      for (Header header : response.getHeaders()) {
+        log.log(header.toString());
+      }
+
+      long bodySize = 0;
+      TypedInput body = response.getBody();
+      if (body != null) {
+        bodySize = body.length();
+
+        if (logLevel.ordinal() >= LogLevel.FULL.ordinal()) {
+          if (!response.getHeaders().isEmpty()) {
+            log.log("");
+          }
+
+          if (!(body instanceof TypedByteArray)) {
+            // Read the entire response body so we can log it and replace the original response
+            response = Utils.readBodyToBytesIfNecessary(response);
+            body = response.getBody();
+          }
+
+          byte[] bodyBytes = ((TypedByteArray) body).getBytes();
+          bodySize = bodyBytes.length;
+          String bodyMime = body.mimeType();
+          String bodyCharset = MimeUtil.parseCharset(bodyMime);
+          log.log(new String(bodyBytes, bodyCharset));
+        }
+      }
+
+      log.log(String.format("<--- END HTTP (%s-byte body)", bodySize));
+    }
+
+    return response;
+  }
+
+  private void logResponseBody(TypedInput body, Object convert) {
+    if (logLevel.ordinal() == LogLevel.HEADERS_AND_ARGS.ordinal()) {
+      log.log("<--- BODY:");
+      log.log(convert.toString());
+    }
+  }
+
+  /**
+   * Log an exception that occurred during the processing of a request or response.
+   */
+  void logException(Throwable t, String url) {
+    log.log(String.format("---- ERROR %s", url != null ? url : ""));
+    StringWriter sw = new StringWriter();
+    t.printStackTrace(new PrintWriter(sw));
+    log.log(sw.toString());
+    log.log("---- END ERROR");
+  }
+
+  /**
+   * Controls the level of logging.
+   */
+  public enum LogLevel {
+    /**
+     * No logging.
+     */
+    NONE,
+    /**
+     * Log only the request method and URL and the response status code and execution time.
+     */
+    BASIC,
+    /**
+     * Log the basic information along with request and response headers.
+     */
+    HEADERS,
+    /**
+     * Log the basic information along with request and response objects via toString().
+     */
+    HEADERS_AND_ARGS,
+    /**
+     * Log the headers, body, and metadata for both requests and responses.
+     * <p>
+     * Note: This requires that the entire request and response body be buffered in memory!
+     */
+    FULL;
+
+    public boolean log() {
+      return this != NONE;
+    }
+  }
+
+  /**
+   * Simple logging abstraction for debug messages.
+   */
+  public interface Log {
+
+    /**
+     * A {@link Log} implementation which does not log anything.
+     */
+    Log NONE = new Log() {
+      @Override
+      public void log(String message) {
+      }
+    };
+
+    /**
+     * Log a debug message to the appropriate console.
+     */
+    void log(String message);
+  }
+
+  /**
+   * Build a new {@link RestAdapter}.
+   * <p>
+   * Calling the following methods is required before calling {@link #build()}:
+   * <ul>
+   * <li>{@link #setEndpoint(Endpoint)}</li>
+   * <li>{@link #setClient(Client.Provider)}</li>
+   * <li>{@link #setConverter(Converter)}</li>
+   * </ul>
+   * <p>
+   * If you are using asynchronous execution (i.e., with {@link Callback Callbacks}) the following
+   * is also required:
+   * <ul>
+   * <li>{@link #setExecutors(java.util.concurrent.Executor, java.util.concurrent.Executor)}</li>
+   * </ul>
+   */
+  public static class Builder {
+
+    private Endpoint endpoint;
+    private Client.Provider clientProvider;
+    private Executor httpExecutor;
+    private Executor callbackExecutor;
+    private RequestInterceptor requestInterceptor;
+    private Converter converter;
+    private Profiler profiler;
+    private ErrorHandler errorHandler;
+    private Log log;
+    private LogLevel logLevel = LogLevel.NONE;
+
+    /**
+     * API endpoint URL.
+     */
+    public Builder setEndpoint(String endpoint) {
+      if (endpoint == null || endpoint.trim().length() == 0) {
+        throw new NullPointerException("Endpoint may not be blank.");
+      }
+      this.endpoint = Endpoints.newFixedEndpoint(endpoint);
+      return this;
+    }
+
+    /**
+     * API endpoint.
+     */
+    public Builder setEndpoint(Endpoint endpoint) {
+      if (endpoint == null) {
+        throw new NullPointerException("Endpoint may not be null.");
+      }
+      this.endpoint = endpoint;
+      return this;
+    }
+
+    /**
+     * The HTTP client used for requests.
+     */
+    public Builder setClient(final Client client) {
+      if (client == null) {
+        throw new NullPointerException("Client may not be null.");
+      }
+      return setClient(new Client.Provider() {
+        @Override
+        public Client get() {
+          return client;
+        }
+      });
+    }
+
+    /**
+     * The HTTP client used for requests.
+     */
+    public Builder setClient(Client.Provider clientProvider) {
+      if (clientProvider == null) {
+        throw new NullPointerException("Client provider may not be null.");
+      }
+      this.clientProvider = clientProvider;
+      return this;
+    }
+
+    /**
+     * Executors used for asynchronous HTTP client downloads and callbacks.
+     *
+     * @param httpExecutor     Executor on which HTTP client calls will be made.
+     * @param callbackExecutor Executor on which any {@link Callback} methods will be invoked. If
+     *                         this argument is {@code null} then callback methods will be run on the same thread as the
+     *                         HTTP client.
+     */
+    public Builder setExecutors(Executor httpExecutor, Executor callbackExecutor) {
+      if (httpExecutor == null) {
+        throw new NullPointerException("HTTP executor may not be null.");
+      }
+      if (callbackExecutor == null) {
+        callbackExecutor = new Utils.SynchronousExecutor();
+      }
+      this.httpExecutor = httpExecutor;
+      this.callbackExecutor = callbackExecutor;
+      return this;
+    }
+
+    /**
+     * A request interceptor for adding data to every request.
+     */
+    public Builder setRequestInterceptor(RequestInterceptor requestInterceptor) {
+      if (requestInterceptor == null) {
+        throw new NullPointerException("Request interceptor may not be null.");
+      }
+      this.requestInterceptor = requestInterceptor;
+      return this;
+    }
+
+    /**
+     * The converter used for serialization and deserialization of objects.
+     */
+    public Builder setConverter(Converter converter) {
+      if (converter == null) {
+        throw new NullPointerException("Converter may not be null.");
+      }
+      this.converter = converter;
+      return this;
+    }
+
+    /**
+     * Set the profiler used to measure requests.
+     */
+    public Builder setProfiler(Profiler profiler) {
+      if (profiler == null) {
+        throw new NullPointerException("Profiler may not be null.");
+      }
+      this.profiler = profiler;
+      return this;
+    }
+
+    /**
+     * The error handler allows you to customize the type of exception thrown for errors on
+     * synchronous requests.
+     */
+    public Builder setErrorHandler(ErrorHandler errorHandler) {
+      if (errorHandler == null) {
+        throw new NullPointerException("Error handler may not be null.");
+      }
+      this.errorHandler = errorHandler;
+      return this;
+    }
+
+    /**
+     * Configure debug logging mechanism.
+     */
+    public Builder setLog(Log log) {
+      if (log == null) {
+        throw new NullPointerException("Log may not be null.");
+      }
+      this.log = log;
+      return this;
+    }
+
+    /**
+     * Change the level of logging.
+     */
+    public Builder setLogLevel(LogLevel logLevel) {
+      if (logLevel == null) {
+        throw new NullPointerException("Log level may not be null.");
+      }
+      this.logLevel = logLevel;
+      return this;
+    }
+
+    /**
+     * Create the {@link RestAdapter} instances.
+     */
+    public RestAdapter build() {
+      if (endpoint == null) {
+        throw new IllegalArgumentException("Endpoint may not be null.");
+      }
+      ensureSaneDefaults();
+      return new RestAdapter(endpoint, clientProvider, httpExecutor, callbackExecutor,
+                             requestInterceptor, converter, profiler, errorHandler, log, logLevel);
+    }
+
+    private void ensureSaneDefaults() {
+      if (converter == null) {
+        converter = Platform.get().defaultConverter();
+      }
+      if (clientProvider == null) {
+        clientProvider = Platform.get().defaultClient();
+      }
+      if (httpExecutor == null) {
+        httpExecutor = Platform.get().defaultHttpExecutor();
+      }
+      if (callbackExecutor == null) {
+        callbackExecutor = Platform.get().defaultCallbackExecutor();
+      }
+      if (errorHandler == null) {
+        errorHandler = ErrorHandler.DEFAULT;
+      }
+      if (log == null) {
+        log = Platform.get().defaultLog();
+      }
+      if (requestInterceptor == null) {
+        requestInterceptor = RequestInterceptor.NONE;
+      }
+    }
+  }
+
   private class RestHandler implements InvocationHandler {
+
     private final Map<Method, RestMethodInfo> methodDetailsCache;
 
     RestHandler(Map<Method, RestMethodInfo> methodDetailsCache) {
@@ -225,7 +578,8 @@ public class RestAdapter {
     }
 
     @SuppressWarnings("unchecked") //
-    @Override public Object invoke(Object proxy, Method method, final Object[] args)
+    @Override
+    public Object invoke(Object proxy, Method method, final Object[] args)
         throws Throwable {
       // If the method is a method from Object then defer to normal invocation.
       if (method.getDeclaringClass() == Object.class) {
@@ -242,7 +596,7 @@ public class RestAdapter {
           Throwable newError = errorHandler.handleError(error);
           if (newError == null) {
             throw new IllegalStateException("Error handler returned null for wrapped exception.",
-                error);
+                                            error);
           }
           throw newError;
         }
@@ -253,18 +607,7 @@ public class RestAdapter {
       }
 
       if (methodInfo.isObservable) {
-        if (rxSupport == null) {
-          if (Platform.HAS_RX_JAVA) {
-            rxSupport = new RxSupport(httpExecutor, errorHandler, requestInterceptor);
-          } else {
-            throw new IllegalStateException("Observable method found but no RxJava on classpath.");
-          }
-        }
-        return rxSupport.createRequestObservable(new RxSupport.Invoker() {
-          @Override public ResponseWrapper invoke(RequestInterceptor requestInterceptor) {
-            return (ResponseWrapper) invokeRequest(requestInterceptor, methodInfo, args);
-          }
-        });
+        throw new IllegalStateException("Observable method found but no RxJava on classpath.");
       }
 
       // Apply the interceptor synchronously, recording the interception so we can replay it later.
@@ -274,7 +617,8 @@ public class RestAdapter {
 
       Callback<?> callback = (Callback<?>) args[args.length - 1];
       httpExecutor.execute(new CallbackRunnable(callback, callbackExecutor, errorHandler) {
-        @Override public ResponseWrapper obtainResponse() {
+        @Override
+        public ResponseWrapper obtainResponse() {
           return (ResponseWrapper) invokeRequest(interceptorTape, methodInfo, args);
         }
       });
@@ -288,7 +632,7 @@ public class RestAdapter {
      * @throws RetrofitError if any error occurs during the HTTP request.
      */
     private Object invokeRequest(RequestInterceptor requestInterceptor, RestMethodInfo methodInfo,
-        Object[] args) {
+                                 Object[] args) {
       String url = null;
       try {
         methodInfo.init(); // Ensure all relevant method information has been loaded.
@@ -397,308 +741,6 @@ public class RestAdapter {
         if (!methodInfo.isSynchronous) {
           Thread.currentThread().setName(IDLE_THREAD_NAME);
         }
-      }
-    }
-  }
-
-  /** Log request headers and body. Consumes request body and returns identical replacement. */
-  Request logAndReplaceRequest(String name, Request request, Object[] args) throws IOException {
-    log.log(String.format("---> %s %s %s", name, request.getMethod(), request.getUrl()));
-
-    if (logLevel.ordinal() >= LogLevel.HEADERS.ordinal()) {
-      for (Header header : request.getHeaders()) {
-        log.log(header.toString());
-      }
-
-      String bodySize = "no";
-      TypedOutput body = request.getBody();
-      if (body != null) {
-        String bodyMime = body.mimeType();
-        if (bodyMime != null) {
-          log.log("Content-Type: " + bodyMime);
-        }
-
-        long bodyLength = body.length();
-        bodySize = bodyLength + "-byte";
-        if (bodyLength != -1) {
-          log.log("Content-Length: " + bodyLength);
-        }
-
-        if (logLevel.ordinal() >= LogLevel.FULL.ordinal()) {
-          if (!request.getHeaders().isEmpty()) {
-            log.log("");
-          }
-          if (!(body instanceof TypedByteArray)) {
-            // Read the entire response body to we can log it and replace the original response
-            request = Utils.readBodyToBytesIfNecessary(request);
-            body = request.getBody();
-          }
-
-          byte[] bodyBytes = ((TypedByteArray) body).getBytes();
-          String bodyCharset = MimeUtil.parseCharset(body.mimeType());
-          log.log(new String(bodyBytes, bodyCharset));
-        } else if (logLevel.ordinal() >= LogLevel.HEADERS_AND_ARGS.ordinal()) {
-          if (!request.getHeaders().isEmpty()) {
-            log.log("---> REQUEST:");
-          }
-          for (int i = 0; i < args.length; i++) {
-            log.log("#" + i + ": " + args[i]);
-          }
-        }
-      }
-
-      log.log(String.format("---> END %s (%s body)", name, bodySize));
-    }
-
-    return request;
-  }
-
-  /** Log response headers and body. Consumes response body and returns identical replacement. */
-  private Response logAndReplaceResponse(String url, Response response, long elapsedTime)
-      throws IOException {
-    log.log(String.format("<--- HTTP %s %s (%sms)", response.getStatus(), url, elapsedTime));
-
-    if (logLevel.ordinal() >= LogLevel.HEADERS.ordinal()) {
-      for (Header header : response.getHeaders()) {
-        log.log(header.toString());
-      }
-
-      long bodySize = 0;
-      TypedInput body = response.getBody();
-      if (body != null) {
-        bodySize = body.length();
-
-        if (logLevel.ordinal() >= LogLevel.FULL.ordinal()) {
-          if (!response.getHeaders().isEmpty()) {
-            log.log("");
-          }
-
-          if (!(body instanceof TypedByteArray)) {
-            // Read the entire response body so we can log it and replace the original response
-            response = Utils.readBodyToBytesIfNecessary(response);
-            body = response.getBody();
-          }
-
-          byte[] bodyBytes = ((TypedByteArray) body).getBytes();
-          bodySize = bodyBytes.length;
-          String bodyMime = body.mimeType();
-          String bodyCharset = MimeUtil.parseCharset(bodyMime);
-          log.log(new String(bodyBytes, bodyCharset));
-        }
-      }
-
-      log.log(String.format("<--- END HTTP (%s-byte body)", bodySize));
-    }
-
-    return response;
-  }
-
-  private void logResponseBody(TypedInput body, Object convert) {
-    if (logLevel.ordinal() == LogLevel.HEADERS_AND_ARGS.ordinal()) {
-      log.log("<--- BODY:");
-      log.log(convert.toString());
-    }
-  }
-
-  /** Log an exception that occurred during the processing of a request or response. */
-  void logException(Throwable t, String url) {
-    log.log(String.format("---- ERROR %s", url != null ? url : ""));
-    StringWriter sw = new StringWriter();
-    t.printStackTrace(new PrintWriter(sw));
-    log.log(sw.toString());
-    log.log("---- END ERROR");
-  }
-
-  private static Profiler.RequestInformation getRequestInfo(String serverUrl,
-      RestMethodInfo methodDetails, Request request) {
-    long contentLength = 0;
-    String contentType = null;
-
-    TypedOutput body = request.getBody();
-    if (body != null) {
-      contentLength = body.length();
-      contentType = body.mimeType();
-    }
-
-    return new Profiler.RequestInformation(methodDetails.requestMethod, serverUrl,
-        methodDetails.requestUrl, contentLength, contentType);
-  }
-
-  /**
-   * Build a new {@link RestAdapter}.
-   * <p>
-   * Calling the following methods is required before calling {@link #build()}:
-   * <ul>
-   * <li>{@link #setEndpoint(Endpoint)}</li>
-   * <li>{@link #setClient(Client.Provider)}</li>
-   * <li>{@link #setConverter(Converter)}</li>
-   * </ul>
-   * <p>
-   * If you are using asynchronous execution (i.e., with {@link Callback Callbacks}) the following
-   * is also required:
-   * <ul>
-   * <li>{@link #setExecutors(java.util.concurrent.Executor, java.util.concurrent.Executor)}</li>
-   * </ul>
-   */
-  public static class Builder {
-    private Endpoint endpoint;
-    private Client.Provider clientProvider;
-    private Executor httpExecutor;
-    private Executor callbackExecutor;
-    private RequestInterceptor requestInterceptor;
-    private Converter converter;
-    private Profiler profiler;
-    private ErrorHandler errorHandler;
-    private Log log;
-    private LogLevel logLevel = LogLevel.NONE;
-
-    /** API endpoint URL. */
-    public Builder setEndpoint(String endpoint) {
-      if (endpoint == null || endpoint.trim().length() == 0) {
-        throw new NullPointerException("Endpoint may not be blank.");
-      }
-      this.endpoint = Endpoints.newFixedEndpoint(endpoint);
-      return this;
-    }
-
-    /** API endpoint. */
-    public Builder setEndpoint(Endpoint endpoint) {
-      if (endpoint == null) {
-        throw new NullPointerException("Endpoint may not be null.");
-      }
-      this.endpoint = endpoint;
-      return this;
-    }
-
-    /** The HTTP client used for requests. */
-    public Builder setClient(final Client client) {
-      if (client == null) {
-        throw new NullPointerException("Client may not be null.");
-      }
-      return setClient(new Client.Provider() {
-        @Override public Client get() {
-          return client;
-        }
-      });
-    }
-
-    /** The HTTP client used for requests. */
-    public Builder setClient(Client.Provider clientProvider) {
-      if (clientProvider == null) {
-        throw new NullPointerException("Client provider may not be null.");
-      }
-      this.clientProvider = clientProvider;
-      return this;
-    }
-
-    /**
-     * Executors used for asynchronous HTTP client downloads and callbacks.
-     *
-     * @param httpExecutor Executor on which HTTP client calls will be made.
-     * @param callbackExecutor Executor on which any {@link Callback} methods will be invoked. If
-     * this argument is {@code null} then callback methods will be run on the same thread as the
-     * HTTP client.
-     */
-    public Builder setExecutors(Executor httpExecutor, Executor callbackExecutor) {
-      if (httpExecutor == null) {
-        throw new NullPointerException("HTTP executor may not be null.");
-      }
-      if (callbackExecutor == null) {
-        callbackExecutor = new Utils.SynchronousExecutor();
-      }
-      this.httpExecutor = httpExecutor;
-      this.callbackExecutor = callbackExecutor;
-      return this;
-    }
-
-    /** A request interceptor for adding data to every request. */
-    public Builder setRequestInterceptor(RequestInterceptor requestInterceptor) {
-      if (requestInterceptor == null) {
-        throw new NullPointerException("Request interceptor may not be null.");
-      }
-      this.requestInterceptor = requestInterceptor;
-      return this;
-    }
-
-    /** The converter used for serialization and deserialization of objects. */
-    public Builder setConverter(Converter converter) {
-      if (converter == null) {
-        throw new NullPointerException("Converter may not be null.");
-      }
-      this.converter = converter;
-      return this;
-    }
-
-    /** Set the profiler used to measure requests. */
-    public Builder setProfiler(Profiler profiler) {
-      if (profiler == null) {
-        throw new NullPointerException("Profiler may not be null.");
-      }
-      this.profiler = profiler;
-      return this;
-    }
-
-    /**
-     * The error handler allows you to customize the type of exception thrown for errors on
-     * synchronous requests.
-     */
-    public Builder setErrorHandler(ErrorHandler errorHandler) {
-      if (errorHandler == null) {
-        throw new NullPointerException("Error handler may not be null.");
-      }
-      this.errorHandler = errorHandler;
-      return this;
-    }
-
-    /** Configure debug logging mechanism. */
-    public Builder setLog(Log log) {
-      if (log == null) {
-        throw new NullPointerException("Log may not be null.");
-      }
-      this.log = log;
-      return this;
-    }
-
-    /** Change the level of logging. */
-    public Builder setLogLevel(LogLevel logLevel) {
-      if (logLevel == null) {
-        throw new NullPointerException("Log level may not be null.");
-      }
-      this.logLevel = logLevel;
-      return this;
-    }
-
-    /** Create the {@link RestAdapter} instances. */
-    public RestAdapter build() {
-      if (endpoint == null) {
-        throw new IllegalArgumentException("Endpoint may not be null.");
-      }
-      ensureSaneDefaults();
-      return new RestAdapter(endpoint, clientProvider, httpExecutor, callbackExecutor,
-          requestInterceptor, converter, profiler, errorHandler, log, logLevel);
-    }
-
-    private void ensureSaneDefaults() {
-      if (converter == null) {
-        converter = Platform.get().defaultConverter();
-      }
-      if (clientProvider == null) {
-        clientProvider = Platform.get().defaultClient();
-      }
-      if (httpExecutor == null) {
-        httpExecutor = Platform.get().defaultHttpExecutor();
-      }
-      if (callbackExecutor == null) {
-        callbackExecutor = Platform.get().defaultCallbackExecutor();
-      }
-      if (errorHandler == null) {
-        errorHandler = ErrorHandler.DEFAULT;
-      }
-      if (log == null) {
-        log = Platform.get().defaultLog();
-      }
-      if (requestInterceptor == null) {
-        requestInterceptor = RequestInterceptor.NONE;
       }
     }
   }

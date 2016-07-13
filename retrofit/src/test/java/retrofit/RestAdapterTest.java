@@ -28,8 +28,6 @@ import retrofit.http.Streaming;
 import retrofit.mime.TypedInput;
 import retrofit.mime.TypedOutput;
 import retrofit.mime.TypedString;
-import rx.Observable;
-import rx.functions.Action1;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
@@ -81,8 +79,6 @@ public class RestAdapterTest {
     @GET("/") Response direct();
     @GET("/") void direct(Callback<Response> callback);
     @GET("/") @Streaming Response streaming();
-    @POST("/") Observable<String> observable(@Body String body);
-    @POST("/{x}/{y}") Observable<Response> observable(@Path("x") String x, @Path("y") String y);
   }
   private interface InvalidExample extends Example {
   }
@@ -696,53 +692,5 @@ public class RestAdapterTest {
     assertThat(error.getResponse().getReason()).isEqualTo("Broken!");
     assertThat(error.getSuccessType()).isEqualTo(String.class);
     assertThat(error.getBody()).isEqualTo("Hey");
-  }
-
-  @Test public void observableCallsOnNext() throws Exception {
-    when(mockClient.execute(any(Request.class))) //
-        .thenReturn(new Response("http://example.com/", 200, "OK", NO_HEADERS, new TypedString("hello")));
-    Action1<String> action = mock(Action1.class);
-    example.observable("Howdy").subscribe(action);
-    verify(action).call(eq("hello"));
-  }
-
-  @Test public void observableCallsOnError() throws Exception {
-    when(mockClient.execute(any(Request.class))) //
-        .thenReturn(new Response("http://example.com/", 300, "FAIL", NO_HEADERS, new TypedString("bummer")));
-    Action1<String> onSuccess = mock(Action1.class);
-    Action1<Throwable> onError = mock(Action1.class);
-    example.observable("Howdy").subscribe(onSuccess, onError);
-    verifyZeroInteractions(onSuccess);
-
-    ArgumentCaptor<RetrofitError> errorCaptor = ArgumentCaptor.forClass(RetrofitError.class);
-    verify(onError).call(errorCaptor.capture());
-    RetrofitError value = errorCaptor.getValue();
-    assertThat(value.getSuccessType()).isEqualTo(String.class);
-  }
-
-  @Test public void observableHandlesParams() throws Exception {
-    ArgumentCaptor<Request> requestCaptor = ArgumentCaptor.forClass(Request.class);
-    when(mockClient.execute(requestCaptor.capture())) //
-        .thenReturn(new Response("http://example.com/", 200, "OK", NO_HEADERS, new TypedString("hello")));
-    ArgumentCaptor<Response> responseCaptor = ArgumentCaptor.forClass(Response.class);
-    Action1<Response> action = mock(Action1.class);
-    example.observable("X", "Y").subscribe(action);
-
-    Request request = requestCaptor.getValue();
-    assertThat(request.getUrl()).contains("/X/Y");
-
-    verify(action).call(responseCaptor.capture());
-    Response response = responseCaptor.getValue();
-    assertThat(response.getStatus()).isEqualTo(200);
-  }
-
-  @Test public void observableUsesHttpExecutor() throws IOException {
-    Response response = new Response("http://example.com/", 200, "OK", NO_HEADERS, new TypedString("hello"));
-    when(mockClient.execute(any(Request.class))).thenReturn(response);
-
-    example.observable("Howdy").subscribe(mock(Action1.class));
-
-    verify(mockRequestExecutor, atLeastOnce()).execute(any(Runnable.class));
-    verifyZeroInteractions(mockCallbackExecutor);
   }
 }

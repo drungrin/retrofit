@@ -10,8 +10,6 @@ import retrofit.client.Header;
 import retrofit.client.Request;
 import retrofit.client.Response;
 import retrofit.http.GET;
-import rx.Observable;
-import rx.Observer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.failBecauseExceptionWasNotThrown;
@@ -29,8 +27,6 @@ public class ErrorHandlerTest {
     @GET("/")
     void onErrorWrappedCustomException(Callback<Response> callback);
 
-    @GET("/")
-    Observable<Response> onErrorCustomException();
   }
 
   static class TestException extends Exception {
@@ -82,25 +78,6 @@ public class ErrorHandlerTest {
 
       @Override public void failure(RetrofitError error) {
         assertThat(error.getCause()).isSameAs(exception);
-      }
-    });
-  }
-
-  @Test public void onErrorCustomException() throws Throwable {
-    final TestException exception = new TestException();
-    doReturn(exception).when(errorHandler).handleError(any(RetrofitError.class));
-
-    client.onErrorCustomException().subscribe(new Observer<Response>() {
-      @Override public void onCompleted() {
-        failBecauseExceptionWasNotThrown(TestException.class);
-      }
-
-      @Override public void onError(Throwable e) {
-        assertThat(e).isSameAs(exception);
-      }
-
-      @Override public void onNext(Response response) {
-        failBecauseExceptionWasNotThrown(TestException.class);
       }
     });
   }

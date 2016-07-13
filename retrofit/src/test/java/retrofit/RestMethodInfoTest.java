@@ -12,7 +12,6 @@ import retrofit.client.Response;
 import retrofit.http.GET;
 import retrofit.http.Query;
 import retrofit.http.Streaming;
-import rx.Observable;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -191,35 +190,6 @@ public class RestMethodInfoTest {
 
     assertThat(methodInfo.isStreaming).isTrue();
     assertThat(methodInfo.responseObjectType).isEqualTo(Response.class);
-  }
-
-  @Test public void observableResponse() {
-    class Example {
-      @GET("/foo") Observable<Response> a() {
-        return null;
-      }
-    }
-
-    Method method = TestingUtils.onlyMethod(Example.class);
-    RestMethodInfo methodInfo = new RestMethodInfo(method);
-    assertThat(methodInfo.isSynchronous).isFalse();
-    assertThat(methodInfo.isObservable).isTrue();
-    assertThat(methodInfo.responseObjectType).isEqualTo(Response.class);
-  }
-
-  @Test public void observableGenericResponse() {
-    class Example {
-      @GET("/foo") Observable<List<String>> a() {
-        return null;
-      }
-    }
-
-    Method method = TestingUtils.onlyMethod(Example.class);
-    RestMethodInfo methodInfo = new RestMethodInfo(method);
-    assertThat(methodInfo.isSynchronous).isFalse();
-    assertThat(methodInfo.isObservable).isTrue();
-    Type expected = new TypeToken<List<String>>() {}.getType();
-    assertThat(methodInfo.responseObjectType).isEqualTo(expected);
   }
 
   private static interface ResponseCallback extends Callback<Response> {

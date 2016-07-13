@@ -45,7 +45,6 @@ import retrofit.http.Query;
 import retrofit.http.QueryMap;
 import retrofit.http.Streaming;
 import retrofit.http.RestMethod;
-import rx.Observable;
 
 /** Request metadata about a service interface declaration. */
 final class RestMethodInfo {
@@ -271,14 +270,6 @@ final class RestMethodInfo {
     }
 
     if (hasReturnType) {
-      if (Platform.HAS_RX_JAVA) {
-        Class rawReturnType = Types.getRawType(returnType);
-        if (RxSupport.isObservable(rawReturnType)) {
-          returnType = RxSupport.getObservableType(returnType, rawReturnType);
-          responseObjectType = getParameterUpperBound((ParameterizedType) returnType);
-          return ResponseType.OBSERVABLE;
-        }
-      }
       responseObjectType = returnType;
       return ResponseType.OBJECT;
     }
@@ -447,16 +438,5 @@ final class RestMethodInfo {
       patterns.add(m.group(1));
     }
     return patterns;
-  }
-
-  /** Indirection to avoid log complaints if RxJava isn't present. */
-  private static final class RxSupport {
-    public static boolean isObservable(Class rawType) {
-      return rawType == Observable.class;
-    }
-
-    public static Type getObservableType(Type contextType, Class contextRawType) {
-      return Types.getSupertype(contextType, contextRawType, Observable.class);
-    }
   }
 }
